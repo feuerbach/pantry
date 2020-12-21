@@ -254,10 +254,15 @@ updateHackageIndexInternal forceUpdate mreason = do
       storeCacheUpdate (FileSize newSize) newHash
     gateUpdate inner = do
       pc <- view pantryConfigL
-      join $ modifyMVar (pcUpdateRef pc) $ \toUpdate -> pure $
+      modifyMVar (pcUpdateRef pc) $ \toUpdate ->
         if toUpdate
-          then (False, UpdateOccurred <$ inner)
-          else (False, pure NoUpdateOccurred)
+          then do
+            -- make sure 'inner' is executed within modifyMVar, so that
+            -- other threads will pause until the index is updated
+            _ <- inner
+            return (False, UpdateOccurred)
+          else
+            return (False, NoUpdateOccurred)
 
 -- | Populate the SQLite tables with Hackage index information.
 populateCache
@@ -592,11 +597,12 @@ getHackageTarball pir mtreeKey = do
         Just pair -> pure pair
         Nothing -> do
           let exc = NoHackageCryptographicHash $ PackageIdentifier name ver
-          updated <- updateHackageIndex $ Just $ display exc <> ", updating"
-          mpair2 <-
-            case updated of
-              UpdateOccurred -> withStorage $ loadHackageTarballInfo name ver
-              NoUpdateOccurred -> pure Nothing
+          _updated <- updateHackageIndex $ Just $ display exc <> ", updating"
+          -- Note: we can't trust the result of updateHackageIndex. Even if
+          -- it says NoUpdateOccurred, it is still possible the the update
+          -- occurred, just in another thread. So in either case we reissue
+          -- the query.
+          mpair2 <- withStorage $ loadHackageTarballInfo name ver
           case mpair2 of
             Nothing -> throwIO exc
             Just pair2 -> pure pair2
